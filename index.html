@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Streaming tiles prototype · Banner Summit</title><link rel="icon" href="data:,">
+<style>
+:root{color-scheme:dark;--bg:#081216;--panel:#0d1a1e;--line:#293c40;--ink:#edf3ec;--muted:#a2b5b5;--accent:#a6e2cc;--mono:Consolas,"SFMono-Regular",monospace;--sans:"Segoe UI",Arial,sans-serif}
+*{box-sizing:border-box}html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.45 var(--sans)}
+#app{display:grid;grid-template-columns:330px minmax(0,1fr);height:100%}
+#side{border-right:1px solid var(--line);background:var(--panel);padding:18px 18px 12px;overflow:auto}
+#stage{position:relative;min-width:0}canvas{display:block;width:100%;height:100%;cursor:grab}canvas:active{cursor:grabbing}
+.eyebrow{font:11px var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--accent);margin:0 0 6px}
+h1{font-size:22px;font-weight:450;letter-spacing:-.03em;margin:0 0 4px}.sub{color:var(--muted);font-size:12.5px;margin:0 0 16px}
+h2{font:11px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);margin:18px 0 8px;font-weight:400}
+.opts{display:flex;flex-direction:column;gap:4px}.chips{display:flex;flex-wrap:wrap;gap:5px}
+button{font:inherit;cursor:pointer;border:1px solid var(--line);background:#0a1619;color:var(--muted);padding:7px 10px;text-align:left}
+button[aria-pressed=true]{border-color:var(--accent);color:var(--accent);background:#183331}
+button:disabled{opacity:.35;cursor:default}.chips button{font:12px var(--mono);padding:5px 10px}
+#legend{margin-top:6px}#ramp{height:12px;border:1px solid var(--line)}#ticks{display:flex;justify-content:space-between;font:11px var(--mono);color:var(--muted);margin-top:4px}
+dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:3px 12px;font:12px var(--mono)}dt{color:var(--muted)}dd{margin:0;text-align:right}
+p.note{color:var(--muted);font-size:12.5px;margin:8px 0 0}
+#hud{position:absolute;left:14px;bottom:12px;font:11px var(--mono);color:var(--muted);background:#081216cc;padding:5px 8px;border:1px solid var(--line)}
+#err{position:absolute;inset:auto 14px 50px 14px;color:#ffb199;font:12px var(--mono);white-space:pre-wrap}
+</style></head>
+<body><div id="app">
+<aside id="side">
+  <p class="eyebrow">Streaming tiles · prototype</p>
+  <h1 id="title">Banner Summit</h1>
+  <p class="sub" id="subtitle">Loading the site description…</p>
+  <h2>Layer</h2><div class="opts" id="layers"></div>
+  <h2>Model block size</h2><div class="chips" id="blocks"></div>
+  <p class="note" id="blocknote">Each block size is a separately trained model.</p>
+  <h2>Colours</h2><div id="legend"><div id="ramp"></div><div id="ticks"><span id="lo"></span><span id="unit"></span><span id="hi"></span></div></div>
+  <h2>What is loaded</h2>
+  <dl><dt>Detail on screen</dt><dd id="s-level">–</dd><dt>Finest available</dt><dd id="s-finest">–</dd>
+    <dt>Tiles in view</dt><dd id="s-view">–</dd><dt>Tiles fetched</dt><dd id="s-fetched">0</dd>
+    <dt>Downloaded</dt><dd id="s-bytes">0 MB</dd><dt>Waiting</dt><dd id="s-pending">0</dd></dl>
+  <p class="note">The page holds no data. It reads one small description file, then fetches only the tiles the camera
+    is looking at, at the detail the zoom needs. Zoom in and watch “Detail on screen” go to 3 m.</p>
+  <p class="note">Drag to orbit · right-drag or shift-drag to pan · wheel to zoom.</p>
+</aside>
+<div id="stage"><canvas id="gl"></canvas><div id="hud">starting…</div><div id="err"></div></div>
+</div>
+<script>
+"use strict";
+const STORE = new URLSearchParams(location.search).get("store") || "banner_summit.zarr";
+const CHUNK = 256, FILL = -32768, PENDING = -32767, EXAG = 2.0, FOV = 40 * Math.PI / 180;
+const $ = id => document.getElementById(id);
+const stats = {fetched: 0, bytes: 0, pending: 0, level: null, cell: null, inView: 0, errors: 0, ready: false};
+window.__tiles = stats;
+const fail = e => { stats.errors++; $("err").textContent += (e && e.message || e) + "\n"; console.error(e); };
+
+async function getJSON(names) {
+  for (const n of names) { const r = await fetch(STORE + "/" + n); if (r.ok) return r.json(); }
+  throw new Error("Could not read the store description from " + STORE);
+}
+async function getChunk(path) {
+  const r = await fetch(STORE + "/" + path);
+  if (!r.ok) throw new Error("tile " + path + ": HTTP " + r.status);
+  const blob = await r.blob();
+  stats.bytes += blob.size; stats.fetched++;
+  const buf = await new Response(blob.stream().pipeThrough(new DecompressionStream("deflate"))).arrayBuffer();
+  return new Int16Array(buf);
+}
+
+/* ---------- WebGL ---------- */
+const canvas = $("gl"), gl = canvas.getContext("webgl2", {antialias: true, preserveDrawingBuffer: true});
+if (!gl) fail("This browser has no WebGL2.");
+const VS = `#version 300 es
+in vec3 aPos; in vec2 aUV; uniform mat4 uMVP; out vec2 vUV;
+void main(){ vUV = aUV; gl_Position = uMVP * vec4(aPos, 1.0); }`;
+const FS = `#version 300 es
+precision highp float; precision highp isampler2D;
+in vec2 vUV; out vec4 o;
+uniform isampler2D uCur, uCoarse; uniform sampler2D uElev, uLut;
+uniform vec2 uCurSize, uCoarseSize, uElevSize; uniform vec2 uCurUV, uCoarseUV, uElevUV;
+uniform float uScale, uOffset, uLo, uHi, uElevCell, uExag; uniform vec3 uSun;
+int cell(isampler2D t, vec2 size, vec2 k){ ivec2 p = ivec2(clamp(vUV * k * size, vec2(0.0), size - 1.0)); return texelFetch(t, p, 0).r; }
+float height(vec2 d){ vec2 p = clamp(vUV * uElevUV * uElevSize + d, vec2(0.0), uElevSize - 1.0); return texelFetch(uElev, ivec2(p), 0).r; }
+void main(){
+  int v = cell(uCur, uCurSize, uCurUV);
+  if (v == ${PENDING}) v = cell(uCoarse, uCoarseSize, uCoarseUV);
+  float hx = height(vec2(1.0, 0.0)) - height(vec2(-1.0, 0.0)), hy = height(vec2(0.0, 1.0)) - height(vec2(0.0, -1.0));
+  vec3 n = normalize(vec3(-hx * uExag, 2.0 * uElevCell, -hy * uExag));
+  float shade = 0.55 + 0.62 * max(dot(n, uSun), 0.0);
+  vec3 c = vec3(0.16, 0.20, 0.21);
+  if (v > ${PENDING}) { float t = clamp((float(v) * uScale + uOffset - uLo) / max(uHi - uLo, 1e-6), 0.0, 1.0); c = texture(uLut, vec2(t, 0.5)).rgb; }
+  o = vec4(c * shade, 1.0);
+}`;
+function shader(type, src){ const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s)); return s; }
+const prog = gl.createProgram(); gl.attachShader(prog, shader(gl.VERTEX_SHADER, VS)); gl.attachShader(prog, shader(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog); if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) fail(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+const U = {}; for (const n of ["uMVP","uCur","uCoarse","uElev","uLut","uCurSize","uCoarseSize","uElevSize","uCurUV","uCoarseUV","uElevUV","uScale","uOffset","uLo","uHi","uElevCell","uExag","uSun"]) U[n] = gl.getUniformLocation(prog, n);
+gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+const fbo = gl.createFramebuffer();
+function intTexture(w, h){            // 16-bit integer texture, every cell marked "not loaded yet"
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t); gl.texStorage2D(gl.TEXTURE_2D, 1, gl.R16I, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo); gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+  gl.clearBufferiv(gl.COLOR, 0, new Int32Array([PENDING, 0, 0, 0])); gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  return t;
+}
+function putChunk(tex, shape, r, c, data){   // data: 256 x 256 Int16, or null for "no data here"
+  const y = r * CHUNK, x = c * CHUNK, h = Math.min(CHUNK, shape[0] - y), w = Math.min(CHUNK, shape[1] - x);
+  if (h <= 0 || w <= 0) return;
+  gl.bindTexture(gl.TEXTURE_2D, tex); gl.pixelStorei(gl.UNPACK_ROW_LENGTH, CHUNK);
+  gl.texSubImage2D(gl.TEXTURE_2D, 0, x, y, w, h, gl.RED_INTEGER, gl.SHORT, data || EMPTY);
+  gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+}
+const EMPTY = new Int16Array(CHUNK * CHUNK).fill(FILL);
+
+/* ---------- palettes ---------- */
+const RAMPS = {
+  blues: [[247,251,255],[198,219,239],[107,174,214],[33,113,181],[8,48,107]],
+  diverging: [[178,24,43],[239,138,98],[247,247,247],[103,169,207],[33,102,172]],   // red = model too shallow, blue = too deep
+  terrain: [[58,84,64],[122,140,94],[190,178,134],[226,214,190],[250,250,250]]};
+const lut = gl.createTexture();
+function setRamp(name){
+  const stops = RAMPS[name] || RAMPS.blues, px = new Uint8Array(256 * 4);
+  for (let i = 0; i < 256; i++){ const f = i / 255 * (stops.length - 1), a = Math.floor(f), b = Math.min(a + 1, stops.length - 1), t = f - a;
+    for (let k = 0; k < 3; k++) px[i * 4 + k] = Math.round(stops[a][k] * (1 - t) + stops[b][k] * t); px[i * 4 + 3] = 255; }
+  gl.bindTexture(gl.TEXTURE_2D, lut); gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 256, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, px);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  $("ramp").style.background = "linear-gradient(90deg," + stops.map(s => `rgb(${s})`).join(",") + ")";
+}
+
+/* ---------- state ---------- */
+let site, extent, layer, range = [0, 1], dirty = true;
+const layerTex = new Map();        // "key/level" -> {tex, shape, have:Set, asked:Set, level}
+let elev = null, mesh = null, hMin = 0, hMean = 0;
+const cam = {yaw: 0.65, pitch: 0.78, dist: 1, target: [0, 0, 0]};
+const byKey = k => site.layers.find(l => l.key === k);
+
+function levelTex(L, i){
+  const id = L.key + "/" + i; let t = layerTex.get(id);
+  if (!t){ const lv = L.levels[i]; t = {tex: intTexture(lv.shape[1], lv.shape[0]), shape: lv.shape, have: new Set(lv.chunks), asked: new Set(), level: lv, path: L.key + "/" + lv.path};
+    layerTex.set(id, t);
+    const rows = Math.ceil(lv.shape[0] / CHUNK), cols = Math.ceil(lv.shape[1] / CHUNK);   // chunks with no file hold no data: mark them now
+    for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) if (!t.have.has(r + "." + c)) { putChunk(t.tex, t.shape, r, c, null); t.asked.add(r + "." + c); } }
+  return t;
+}
+const queue = []; let active = 0;
+function request(t, r, c, priority){
+  const name = r + "." + c; if (t.asked.has(name)) return; t.asked.add(name); stats.pending++;
+  queue.push({t, r, c, name, priority}); queue.sort((a, b) => a.priority - b.priority); pump();
+}
+function pump(){
+  while (active < 6 && queue.length){ const j = queue.shift(); active++;
+    getChunk(j.t.path + "/" + j.name).then(d => { putChunk(j.t.tex, j.t.shape, j.r, j.c, d); dirty = true; })
+      .catch(fail).finally(() => { active--; stats.pending--; pump(); }); }
+}
+async function loadWholeLevel(L, i){     // used for the coarse fallback and the terrain
+  const t = levelTex(L, i), jobs = [];
+  for (const name of t.have){ if (t.asked.has(name)) continue; t.asked.add(name); const [r, c] = name.split(".").map(Number);
+    jobs.push(getChunk(t.path + "/" + name).then(d => ({r, c, d}))); }
+  const got = await Promise.all(jobs); for (const g of got) putChunk(t.tex, t.shape, g.r, g.c, g.d);
+  return {t, got};
+}
+
+/* ---------- terrain ---------- */
+async function buildTerrain(){
+  const E = byKey("elevation"), sf = E.scale_factor, off = E.add_offset;
+  const pick = want => E.levels.reduce((b, lv, i) => Math.abs(lv.cell_m - want) < Math.abs(E.levels[b].cell_m - want) ? i : b, 0);
+  async function grid(i){ const lv = E.levels[i], h = new Float32Array(lv.shape[0] * lv.shape[1]).fill(NaN);
+    await Promise.all(lv.chunks.map(async name => { const [r, c] = name.split(".").map(Number), d = await getChunk("elevation/" + lv.path + "/" + name);
+      for (let y = 0; y < CHUNK && r * CHUNK + y < lv.shape[0]; y++) for (let x = 0; x < CHUNK && c * CHUNK + x < lv.shape[1]; x++){
+        const v = d[y * CHUNK + x]; if (v !== FILL) h[(r * CHUNK + y) * lv.shape[1] + c * CHUNK + x] = v * sf + off; } }));
+    return {lv, h}; }
+  const [m, s] = await Promise.all([grid(pick(24)), grid(pick(12))]);
+  let lo = Infinity, sum = 0, n = 0; for (const v of m.h) if (v === v){ lo = Math.min(lo, v); sum += v; n++; }
+  hMin = lo; hMean = sum / n;
+  // shading texture: heights in metres, missing cells filled with the lowest height
+  const sh = s.h.map(v => v === v ? v : lo); elev = {tex: gl.createTexture(), shape: s.lv.shape, cell: s.lv.cell_m};
+  gl.bindTexture(gl.TEXTURE_2D, elev.tex); gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, s.lv.shape[1], s.lv.shape[0], 0, gl.RED, gl.FLOAT, sh);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST); gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+  // mesh: one vertex per cell of the mesh level, triangles only where all four corners have terrain
+  const H = m.lv.shape[0], W = m.lv.shape[1], cs = m.lv.cell_m, pos = new Float32Array(W * H * 5), idx = [];
+  for (let r = 0; r < H; r++) for (let c = 0; c < W; c++){ const k = (r * W + c) * 5, v = m.h[r * W + c];
+    pos[k] = (c + .5) * cs - extent[0] / 2; pos[k + 1] = ((v === v ? v : lo) - lo) * EXAG; pos[k + 2] = (r + .5) * cs - extent[1] / 2;
+    pos[k + 3] = (c + .5) * cs / extent[0]; pos[k + 4] = (r + .5) * cs / extent[1]; }
+  const ok = (r, c) => m.h[r * W + c] === m.h[r * W + c];
+  for (let r = 0; r < H - 1; r++) for (let c = 0; c < W - 1; c++) if (ok(r, c) && ok(r + 1, c) && ok(r, c + 1) && ok(r + 1, c + 1)){
+    const a = r * W + c; idx.push(a, a + W, a + 1, a + 1, a + W, a + W + 1); }
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer()); gl.bufferData(gl.ARRAY_BUFFER, pos, gl.STATIC_DRAW);
+  const aPos = gl.getAttribLocation(prog, "aPos"), aUV = gl.getAttribLocation(prog, "aUV");
+  gl.enableVertexAttribArray(aPos); gl.vertexAttribPointer(aPos, 3, gl.FLOAT, false, 20, 0);
+  gl.enableVertexAttribArray(aUV); gl.vertexAttribPointer(aUV, 2, gl.FLOAT, false, 20, 12);
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, gl.createBuffer()); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint32Array(idx), gl.STATIC_DRAW);
+  mesh = {vao, count: idx.length};
+  cam.dist = Math.max(extent[0], extent[1]) * 1.25; cam.target = [0, (hMean - hMin) * EXAG, 0];
+}
+
+/* ---------- camera ---------- */
+const sub = (a, b) => [a[0]-b[0], a[1]-b[1], a[2]-b[2]], cross = (a, b) => [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const norm = a => { const l = Math.hypot(...a) || 1; return a.map(v => v / l); }, dot = (a, b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+function basis(){
+  const cp = Math.cos(cam.pitch), eye = [cam.target[0] + cam.dist * cp * Math.sin(cam.yaw), cam.target[1] + cam.dist * Math.sin(cam.pitch), cam.target[2] + cam.dist * cp * Math.cos(cam.yaw)];
+  const f = norm(sub(cam.target, eye)), r = norm(cross(f, [0, 1, 0])), u = cross(r, f); return {eye, f, r, u};
+}
+function mvp(aspect){
+  const {eye, f, r, u} = basis(), near = cam.dist * 0.02, far = cam.dist * 8 + Math.max(...extent), t = 1 / Math.tan(FOV / 2);
+  const V = [r[0],u[0],-f[0],0, r[1],u[1],-f[1],0, r[2],u[2],-f[2],0, -dot(r,eye),-dot(u,eye),dot(f,eye),1];
+  const P = [t/aspect,0,0,0, 0,t,0,0, 0,0,(far+near)/(near-far),-1, 0,0,2*far*near/(near-far),0], M = new Float32Array(16);
+  for (let c = 0; c < 4; c++) for (let rr = 0; rr < 4; rr++){ let s = 0; for (let k = 0; k < 4; k++) s += P[k*4+rr] * V[c*4+k]; M[c*4+rr] = s; }
+  return M;
+}
+function viewBox(aspect){        // where the screen's rays meet the mean terrain height, in metres from the north-west corner
+  const {eye, f, r, u} = basis(), th = Math.tan(FOV / 2), y0 = (hMean - hMin) * EXAG; let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, hit = 0;
+  for (let i = 0; i <= 8; i++) for (let j = 0; j <= 8; j++){ const nx = i / 4 - 1, ny = j / 4 - 1;
+    const d = norm([f[0] + r[0]*nx*th*aspect + u[0]*ny*th, f[1] + r[1]*nx*th*aspect + u[1]*ny*th, f[2] + r[2]*nx*th*aspect + u[2]*ny*th]);
+    if (d[1] >= -1e-4) continue; const s = (y0 - eye[1]) / d[1]; if (s <= 0) continue; hit++;
+    const x = eye[0] + d[0]*s + extent[0]/2, z = eye[2] + d[2]*s + extent[1]/2; x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+  if (hit < 8) return [0, extent[0], 0, extent[1]];
+  return [Math.max(0, x0), Math.min(extent[0], x1), Math.max(0, z0), Math.min(extent[1], z1)];
+}
+
+/* ---------- choosing and requesting tiles ---------- */
+function wantedLevel(L){
+  const mpp = 2 * cam.dist * Math.tan(FOV / 2) / canvas.height;         // metres of ground per screen pixel at the target
+  let best = L.levels.length - 1; for (let i = L.levels.length - 1; i >= 0; i--) if (L.levels[i].cell_m >= mpp * 0.9) best = i;
+  return best;
+}
+function update(){
+  if (!layer || !mesh) return;
+  const i = wantedLevel(layer), t = levelTex(layer, i), lv = layer.levels[i], box = viewBox(canvas.width / canvas.height), cm = lv.cell_m * CHUNK;
+  const c0 = Math.floor(box[0] / cm), c1 = Math.floor(box[1] / cm), r0 = Math.floor(box[2] / cm), r1 = Math.floor(box[3] / cm);
+  const tc = (cam.target[0] + extent[0] / 2) / cm, trw = (cam.target[2] + extent[1] / 2) / cm; let n = 0;
+  for (let r = r0; r <= r1; r++) for (let c = c0; c <= c1; c++) if (t.have.has(r + "." + c)) { n++; request(t, r, c, Math.hypot(r + .5 - trw, c + .5 - tc)); }
+  stats.level = i; stats.cell = lv.cell_m; stats.inView = n; layer._cur = t;
+}
+
+/* ---------- drawing ---------- */
+function draw(){
+  requestAnimationFrame(draw);
+  const w = canvas.clientWidth * devicePixelRatio | 0, h = canvas.clientHeight * devicePixelRatio | 0;
+  if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; dirty = true; }
+  $("s-level").textContent = stats.cell ? stats.cell + " m cells" : "–"; $("s-view").textContent = stats.inView;
+  $("s-fetched").textContent = stats.fetched; $("s-bytes").textContent = (stats.bytes / 1e6).toFixed(1) + " MB"; $("s-pending").textContent = stats.pending;
+  if (!dirty || !mesh || !layer || !layer._coarse) return; dirty = false;
+  update();
+  gl.viewport(0, 0, w, h); gl.clearColor(0.031, 0.071, 0.086, 1); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT); gl.enable(gl.DEPTH_TEST);
+  gl.useProgram(prog); gl.uniformMatrix4fv(U.uMVP, false, mvp(w / h));
+  const bind = (unit, tex, loc) => { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(loc, unit); };
+  const cur = layer._cur, co = layer._coarse, uv = t => [extent[0] / (t.shape[1] * t.level.cell_m), extent[1] / (t.shape[0] * t.level.cell_m)];
+  bind(0, cur.tex, U.uCur); bind(1, co.tex, U.uCoarse); bind(2, elev.tex, U.uElev); bind(3, lut, U.uLut);
+  gl.uniform2f(U.uCurSize, cur.shape[1], cur.shape[0]); gl.uniform2f(U.uCoarseSize, co.shape[1], co.shape[0]); gl.uniform2f(U.uElevSize, elev.shape[1], elev.shape[0]);
+  gl.uniform2fv(U.uCurUV, uv(cur)); gl.uniform2fv(U.uCoarseUV, uv(co)); gl.uniform2f(U.uElevUV, extent[0] / (elev.shape[1] * elev.cell), extent[1] / (elev.shape[0] * elev.cell));
+  gl.uniform1f(U.uScale, layer.scale_factor); gl.uniform1f(U.uOffset, layer.add_offset); gl.uniform1f(U.uLo, range[0]); gl.uniform1f(U.uHi, range[1]);
+  gl.uniform1f(U.uElevCell, elev.cell); gl.uniform1f(U.uExag, EXAG); gl.uniform3fv(U.uSun, norm([-0.55, 0.62, -0.55]));
+  gl.bindVertexArray(mesh.vao); gl.drawElements(gl.TRIANGLES, mesh.count, gl.UNSIGNED_INT, 0);
+  $("hud").textContent = `${layer.label} · showing ${stats.cell} m cells · ${stats.fetched} tiles · ${(stats.bytes / 1e6).toFixed(1)} MB`;
+}
+
+/* ---------- layer choice ---------- */
+let kind = "lidar", block = 30;
+async function choose(){
+  const want = kind === "prediction" ? "rf_" + block + "m" : kind === "error" ? "error_" + block + "m" : kind === "terrain" ? "elevation" : site.layers.find(l => l.kind === "lidar").key;
+  const L = byKey(want); if (!L) return;
+  if (!L._coarse) L._coarse = (await loadWholeLevel(L, L.levels.length - 1)).t;
+  layer = L; setRamp(L.cmap);
+  range = L.cmap === "diverging" ? (m => [-m, m])(Math.max(Math.abs(L.p2), Math.abs(L.p98))) : [L.p2, L.p98];
+  $("lo").textContent = range[0].toFixed(2); $("hi").textContent = range[1].toFixed(2); $("unit").textContent = L.units + (L.cmap === "diverging" ? " · blue = model too deep" : "");
+  $("s-finest").textContent = L.cell_m + " m cells";
+  for (const b of $("layers").children) b.setAttribute("aria-pressed", String(b.dataset.kind === kind));
+  for (const b of $("blocks").children){ b.setAttribute("aria-pressed", String(+b.dataset.block === block)); b.disabled = !(kind === "prediction" || kind === "error"); }
+  dirty = true;
+}
+function buildUI(){
+  $("title").textContent = site.site.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());
+  $("subtitle").textContent = `LiDAR ${site.lidar_date} · ${site.shape_3m[1].toLocaleString()} × ${site.shape_3m[0].toLocaleString()} cells at 3 m · ${site.note}`;
+  for (const [k, label] of [["lidar", "LiDAR snow depth (measured)"], ["prediction", "Random forest prediction"], ["error", "Prediction minus LiDAR"], ["terrain", "Elevation"]]){
+    const b = document.createElement("button"); b.textContent = label; b.dataset.kind = k; b.onclick = () => { kind = k; choose().catch(fail); }; $("layers").appendChild(b); }
+  const blocks = site.layers.filter(l => l.kind === "prediction").map(l => l.block_m).sort((a, b) => a - b);
+  if (!blocks.includes(block)) block = blocks[blocks.length - 1];
+  for (const n of blocks){ const b = document.createElement("button"); b.textContent = n + " m"; b.dataset.block = n; b.onclick = () => { block = n; choose().catch(fail); }; $("blocks").appendChild(b); }
+}
+
+/* ---------- input ---------- */
+let drag = null;
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+canvas.addEventListener("pointerdown", e => { drag = {x: e.clientX, y: e.clientY, pan: e.button === 2 || e.shiftKey}; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener("pointerup", () => drag = null);
+canvas.addEventListener("pointermove", e => { if (!drag) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY;
+  if (drag.pan){ const {r} = basis(), k = cam.dist * 0.0016, fw = norm([Math.sin(cam.yaw), 0, Math.cos(cam.yaw)]);
+    cam.target[0] += -r[0] * dx * k - fw[0] * dy * k; cam.target[2] += -r[2] * dx * k - fw[2] * dy * k; }
+  else { cam.yaw -= dx * 0.005; cam.pitch = Math.min(1.5, Math.max(0.12, cam.pitch + dy * 0.005)); }
+  dirty = true; });
+canvas.addEventListener("wheel", e => { e.preventDefault(); cam.dist = Math.min(Math.max(extent[0], extent[1]) * 3, Math.max(60, cam.dist * Math.exp(e.deltaY * 0.0012))); dirty = true; }, {passive: false});
+window.__setView = (dist, tx, tz) => { if (dist > 0) cam.dist = dist; if (tx !== undefined){ cam.target[0] = tx; cam.target[2] = tz; } dirty = true; };   // used by the automated check
+
+(async () => {
+  const meta = await getJSON([".zmetadata", "zmetadata.json"]);
+  site = meta.metadata[".zattrs"]; extent = [site.shape_3m[1] * 3, site.shape_3m[0] * 3];
+  buildUI(); await buildTerrain(); await choose(); stats.ready = true; draw();
+})().catch(fail);
+</script></body></html>
