@@ -32,6 +32,7 @@ const js = async expr => { const r = await send("Runtime.evaluate", {expression:
       const p=new Uint8Array(4*200*200);g.readPixels(c.width/2-100|0,c.height/2-100|0,200,200,g.RGBA,g.UNSIGNED_BYTE,p);const u=new Set();for(let i=0;i<p.length;i+=4)u.add(p[i]+','+p[i+1]+','+p[i+2]);return u.size`);
     await wait("window.__tiles && window.__tiles.ready", "viewer ready"); await settle();
     console.log(await snap("whole site, LiDAR depth"), "| distinct colours at centre:", await pixel());
+    console.log("whole site, exact flag:", await js(`return document.getElementById('s-exact').textContent`));
     await js(`window.__setView(900, 0, 0)`); await settle();
     console.log(await snap("zoomed in"), "| distinct colours at centre:", await pixel());
     await js(`window.__setView(250, 0, 0)`); await settle();
@@ -41,7 +42,7 @@ const js = async expr => { const r = await send("Runtime.evaluate", {expression:
     for (const b of await js(`return [...document.querySelectorAll('#blocks button')].map(b=>b.dataset.block)`)) { await js(`document.querySelector('#blocks [data-block="${b}"]').click()`); await settle(); console.log(await snap("prediction " + b + " m"), "| finest:", await js(`return document.getElementById('s-finest').textContent`)); }
     await js(`document.querySelector('#layers [data-kind=lidar]').click()`); await settle();
     for (const b of await js(`return [...document.querySelectorAll('#blocks button')].map(b=>b.dataset.block)`)) { await js(`document.querySelector('#blocks [data-block="${b}"]').click()`); await settle();
-      console.log(await snap("LiDAR at " + b + " m"), "|", await js(`return document.getElementById('hud').textContent.split(' · ').slice(0,2).join(' · ')+' | range '+document.getElementById('lo').textContent+'..'+document.getElementById('hi').textContent`)); }
+      console.log(await snap("LiDAR at " + b + " m"), "| exact:", await js(`return document.getElementById('s-exact').textContent`), "|", await js(`return document.getElementById('hud').textContent.split(' · ').slice(0,2).join(' · ')+' | range '+document.getElementById('lo').textContent+'..'+document.getElementById('hi').textContent`)); }
     // seam check: zoom in on the LiDAR layer, pan in steps, and count pixels that show the background through the ground
     await js(`document.querySelector('#layers [data-kind=error]').click(); document.querySelector('#blocks [data-block="3"]').click()`); await settle();
     const holes = () => js(`const c=document.getElementById('gl'),g=c.getContext('webgl2');await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));

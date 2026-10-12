@@ -73,25 +73,6 @@ Values are 16-bit integers with a scale and offset (`value = stored * scale_fact
 add_offset`); `-32768` means no data. It is an ordinary Zarr version 2 store, so Zarr
 libraries can open it too.
 
-## Run it yourself
-
-```bash
-python -m http.server 8000
-```
-
-Then open `http://localhost:8000/`. To rebuild the store you need the site's archive file
-and the prediction maps:
-
-```bash
-python tools/build_pyramid.py --site banner_summit --archive banner_summit.enriched.h5 \
-    --date 20210315 --maps <folder of prediction GeoTIFFs> --out .
-python -m unittest tools/test_build_pyramid.py
-node tools/check_viewer.js http://localhost:8000/index.html
-```
-
-`check_viewer.js` drives a headless Chrome through the page, zooms and pans, and reports
-what was fetched and whether any background shows through the ground.
-
 ## Limits of the prototype
 
 - One site, one LiDAR date.

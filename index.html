@@ -34,6 +34,7 @@ p.note{color:var(--muted);font-size:12.5px;margin:8px 0 0}
   <h2>What is loaded</h2>
   <dl><dt>Colour detail on screen</dt><dd id="s-level">–</dd><dt>Ground detail on screen</dt><dd id="s-ground">–</dd>
     <dt>Finest for this layer</dt><dd id="s-finest">–</dd>
+    <dt>At this layer's own detail</dt><dd id="s-exact">–</dd>
     <dt>Colour tiles in view</dt><dd id="s-view">–</dd><dt>Ground tiles drawn</dt><dd id="s-gtiles">–</dd>
     <dt>Tiles fetched</dt><dd id="s-fetched">0</dd><dt>Downloaded</dt><dd id="s-bytes">0 MB</dd><dt>Waiting</dt><dd id="s-pending">0</dd></dl>
   <p class="note">The page holds no data. It reads one small description file, then fetches only the tiles the camera
@@ -48,7 +49,7 @@ const STORE = new URLSearchParams(location.search).get("store") || "banner_summi
 const CHUNK = 256, FILL = -32768, PENDING = -32767, EXAG = 2.0, FOV = 40 * Math.PI / 180;
 const MAX_COLOUR_TILES = 96, MAX_GROUND_TILES = 64, KEEP_GROUND_MESHES = 130;
 const $ = id => document.getElementById(id);
-const stats = {fetched: 0, bytes: 0, pending: 0, level: null, cell: null, inView: 0, errors: 0, ready: false, groundCell: null, groundTiles: 0, groundBase: null};
+const stats = {exact: false, fetched: 0, bytes: 0, pending: 0, level: null, cell: null, inView: 0, errors: 0, ready: false, groundCell: null, groundTiles: 0, groundBase: null};
 window.__tiles = stats;
 const fail = e => { stats.errors++; $("err").textContent += (e && e.message || e) + "\n"; console.error(e); };
 
@@ -322,6 +323,9 @@ function draw(){
   if (canvas.width !== w || canvas.height !== h){ canvas.width = w; canvas.height = h; dirty = true; }
   $("s-level").textContent = stats.cell ? stats.cell + " m cells" : "–"; $("s-ground").textContent = stats.groundCell ? stats.groundCell + " m" : "–";
   $("s-view").textContent = stats.inView; $("s-gtiles").textContent = stats.groundTiles;
+  // true when both the colours and the ground are drawn at exactly this layer's block size, with nothing still loading
+  stats.exact = !!(layer && ground && stats.cell === layer.cell_m && stats.groundCell === ground.E.cell_m && stats.pending === 0);
+  $("s-exact").textContent = stats.exact ? "✓ yes" : "zoom in"; $("s-exact").style.color = stats.exact ? "var(--accent)" : "";
   $("s-fetched").textContent = stats.fetched; $("s-bytes").textContent = (stats.bytes / 1e6).toFixed(1) + " MB"; $("s-pending").textContent = stats.pending;
   if (!dirty || !ground || !layer || !layer._coarse) return; dirty = false;
   gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
