@@ -44,7 +44,7 @@ p.note{color:var(--muted);font-size:12.5px;margin:8px 0 0}
 "use strict";
 const STORE = new URLSearchParams(location.search).get("store") || "banner_summit.zarr";
 const CHUNK = 256, FILL = -32768, PENDING = -32767, EXAG = 2.0, FOV = 40 * Math.PI / 180;
-const MAX_COLOUR_TILES = 96, MAX_GROUND_TILES = 40, KEEP_GROUND_MESHES = 90;
+const MAX_COLOUR_TILES = 96, MAX_GROUND_TILES = 64, KEEP_GROUND_MESHES = 130;
 const $ = id => document.getElementById(id);
 const stats = {fetched: 0, bytes: 0, pending: 0, level: null, cell: null, inView: 0, errors: 0, ready: false, groundCell: null, groundTiles: 0, groundBase: null};
 window.__tiles = stats;
@@ -81,6 +81,7 @@ void main(){
   if (uBase == 1 && texture(uCover, vUV * uCoverUV).r > 0.5) discard;
   int v = cell(uCur, uCurSize, uCurUV);
   if (v == ${PENDING}) v = cell(uCoarse, uCoarseSize, uCoarseUV);
+  if (dot(vN, vN) < 0.25) { o = vec4(0.075, 0.105, 0.115, 1.0); return; }      // the wall under a tile edge: plain and dark
   float shade = 0.55 + 0.62 * max(dot(normalize(vN), uSun), 0.0);
   vec3 c = vec3(0.16, 0.20, 0.21);
   if (v > ${PENDING}) { float t = clamp((float(v) * uScale + uOffset - uLo) / max(uHi - uLo, 1e-6), 0.0, 1.0); c = texture(uLut, vec2(t, 0.5)).rgb; }
@@ -128,7 +129,7 @@ function setRamp(name){
 }
 
 /* ---------- state ---------- */
-let site, extent, layer, range = [0, 1], dirty = true, hMin = 0, hMean = 0;
+let site, extent, layer, range = [0, 1], dirty = true, hMin = 0, hMean = 0, hMax = 0;
 const layerTex = new Map();        // "key/level" -> colour texture of one level
 const cam = {yaw: 0.65, pitch: 0.78, dist: 1, target: [0, 0, 0]};
 const byKey = k => site.layers.find(l => l.key === k);
@@ -160,7 +161,7 @@ async function loadWholeLevel(L, i){     // the coarse fallback of a layer
 
 /* ---------- ground ---------- */
 // A mesh has one vertex per cell centre. `get(ix, iz)` returns the height in metres or NaN.
-function buildMesh(get, nx, nz, cell, ox, oz, skirt){
+function buildMesh(get, nx, nz, cell, ox, oz, skirt){     // skirt: null, or which sides get a wall {top, right, bottom, left}
   const border = skirt ? 2 * (nx + nz) : 0, v = new Float32Array((nx * nz + border) * 8), idx = [];
   const H = (x, z) => get(Math.min(nx - 1, Math.max(0, x)), Math.min(nz - 1, Math.max(0, z)));
   const put = (k, x, y, z, n) => { v[k] = x - extent[0] / 2; v[k + 1] = (y - hMin) * EXAG; v[k + 2] = z - extent[1] / 2; v[k + 3] = x / extent[0]; v[k + 4] = z / extent[1]; v[k + 5] = n[0]; v[k + 6] = n[1]; v[k + 7] = n[2]; };
@@ -171,13 +172,15 @@ function buildMesh(get, nx, nz, cell, ox, oz, skirt){
     put((z * nx + x) * 8, (ox + x + .5) * cell, y, (oz + z + .5) * cell, norm([-(r - l) * EXAG, 2 * cell, -(d - u) * EXAG])); }
   for (let z = 0; z < nz - 1; z++) for (let x = 0; x < nx - 1; x++){ const a = z * nx + x;
     if (valid[a] && valid[a + 1] && valid[a + nx] && valid[a + nx + 1]) idx.push(a, a + nx, a + 1, a + 1, a + nx, a + nx + 1); }
-  if (skirt){                                  // a wall hanging from the tile's edge hides the seam with coarser ground
-    let k = nx * nz; const drop = Math.max(40, cell * 6), edge = [];
-    for (let x = 0; x < nx; x++) edge.push(x); for (let z = 1; z < nz; z++) edge.push(z * nx + nx - 1);
-    for (let x = nx - 2; x >= 0; x--) edge.push((nz - 1) * nx + x); for (let z = nz - 2; z >= 0; z--) edge.push(z * nx);
-    const first = k;
-    for (const a of edge){ const s = a * 8, t = k * 8; for (let j = 0; j < 8; j++) v[t + j] = v[s + j]; v[t + 1] -= drop * EXAG; k++; }
-    for (let i = 0; i < edge.length - 1; i++){ const a = edge[i], b = edge[i + 1]; if (valid[a] && valid[b]) idx.push(a, first + i, b, b, first + i, first + i + 1); }
+  if (skirt){                                  // a wall hanging from a tile edge hides the step down to coarser ground
+    let k = nx * nz; const drop = Math.max(40, cell * 6), sides = [];
+    const run = (n, at) => { const e = []; for (let i = 0; i < n; i++) e.push(at(i)); return e; };
+    if (skirt.top) sides.push(run(nx, i => i)); if (skirt.bottom) sides.push(run(nx, i => (nz - 1) * nx + i));
+    if (skirt.left) sides.push(run(nz, i => i * nx)); if (skirt.right) sides.push(run(nz, i => i * nx + nx - 1));
+    for (const edge of sides){ const first = k;
+      for (const a of edge){ const s0 = a * 8, t = k * 8; for (let j = 0; j < 5; j++) v[t + j] = v[s0 + j]; v[t + 1] -= drop * EXAG; v[t + 5] = v[t + 6] = v[t + 7] = 0; k++; }
+      // the top of the wall re-uses the surface vertices, so only its lower part is flagged dark; keep it short of the surface colour
+      for (let i = 0; i < edge.length - 1; i++){ const p = edge[i], q = edge[i + 1]; if (valid[p] && valid[q]) idx.push(p, first + i, q, q, first + i, first + i + 1); } }
   }
   if (!idx.length) return null;
   const vao = gl.createVertexArray(), vb = gl.createBuffer(), ib = gl.createBuffer(); gl.bindVertexArray(vao);
@@ -192,7 +195,7 @@ function buildMesh(get, nx, nz, cell, ox, oz, skirt){
 function freeMesh(m){ if (!m) return; gl.deleteVertexArray(m.vao); gl.deleteBuffer(m.vb); gl.deleteBuffer(m.ib); }
 
 // One "ground source" per elevation layer: the plain 3 m elevation, or elevation averaged to a model's block size.
-const grounds = new Map(); let ground = null;
+const grounds = new Map(); let ground = null, coarseGrid = null;
 const cover = gl.createTexture();
 function groundFor(L){ return (L.block_m && byKey("elevation_" + L.block_m + "m")) || byKey("elevation"); }
 async function prepareGround(E){
@@ -202,8 +205,9 @@ async function prepareGround(E){
   await Promise.all(lv.chunks.map(async name => { const [r, c] = name.split(".").map(Number), d = await getChunk(E.key + "/" + lv.path + "/" + name);
     for (let y = 0; y < CHUNK && r * CHUNK + y < Hh; y++) for (let x = 0; x < CHUNK && c * CHUNK + x < W; x++){
       const q = d[y * CHUNK + x]; if (q !== FILL) h[(r * CHUNK + y) * W + c * CHUNK + x] = q * E.scale_factor + E.add_offset; } }));
-  if (!grounds.size){ let lo = Infinity, sum = 0, n = 0; for (const q of h) if (q === q){ lo = Math.min(lo, q); sum += q; n++; } hMin = lo; hMean = sum / n; }
-  g = {E, baseLevel: bi, base: buildMesh((x, z) => h[z * W + x], W, Hh, lv.cell_m, 0, 0, false), heights: new Map(), asked: new Set(), meshes: new Map(), stale: new Set(), _coverUV: [1, 1]};
+  if (!grounds.size){ let lo = Infinity, hi = -Infinity, sum = 0, n = 0; for (const q of h) if (q === q){ lo = Math.min(lo, q); hi = Math.max(hi, q); sum += q; n++; } hMin = lo; hMax = hi; hMean = sum / n; coarseGrid = {h, W, H: Hh, cell: lv.cell_m}; }
+  g = {E, baseLevel: bi, base: buildMesh((x, z) => h[z * W + x], W, Hh, lv.cell_m, 0, 0, null), heights: new Map(), asked: new Set(), meshes: new Map(), stale: new Set(), _coverUV: [1, 1],
+       have: E.levels.map(l => new Set(l.chunks))};
   grounds.set(E.key, g); return g;
 }
 function groundTile(g, i, r, c){            // build (or rebuild) the mesh of one ground tile from the heights we hold
@@ -217,14 +221,17 @@ function groundTile(g, i, r, c){            // build (or rebuild) the mesh of on
     else if (x >= CHUNK){ if (right) { src = right; xx = 0; } else xx = CHUNK - 1; }
     else if (z >= CHUNK){ if (down) { src = down; zz = 0; } else zz = CHUNK - 1; }
     const q = src[zz * CHUNK + xx]; return q === FILL ? NaN : q * sf + off; };
-  freeMesh(g.meshes.get(id)); const m = buildMesh(get, nx, nz, lv.cell_m, c * CHUNK, r * CHUNK, true);
+  // a wall is needed only where the next tile exists in the store but is not loaded (coarser ground shows there)
+  const open = (rr, cc) => g.have[i].has(rr + "." + cc) && !at(rr, cc);
+  const sides = {top: open(r - 1, c), left: open(r, c - 1), right: open(r, c + 1), bottom: open(r + 1, c)};
+  freeMesh(g.meshes.get(id)); const m = buildMesh(get, nx, nz, lv.cell_m, c * CHUNK, r * CHUNK, sides);
   if (m) g.meshes.set(id, m); else g.meshes.delete(id);
 }
 function wantGround(g, i, r, c, priority){
   const id = i + "/" + r + "." + c; if (g.asked.has(id)) return; g.asked.add(id);
   enqueue(g.E.key + "/" + g.E.levels[i].path + "/" + r + "." + c, priority, d => {
     g.heights.set(id, d); g.stale.add(id);
-    for (const [dr, dc] of [[0, -1], [-1, 0], [-1, -1]]) if (g.heights.has(i + "/" + (r + dr) + "." + (c + dc))) g.stale.add(i + "/" + (r + dr) + "." + (c + dc)); });
+    for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) if ((dr || dc) && g.heights.has(i + "/" + (r + dr) + "." + (c + dc))) g.stale.add(i + "/" + (r + dr) + "." + (c + dc)); });
 }
 
 /* ---------- camera ---------- */
@@ -242,24 +249,40 @@ function mvp(aspect){
   for (let c = 0; c < 4; c++) for (let rr = 0; rr < 4; rr++){ let s = 0; for (let k = 0; k < 4; k++) s += P[k*4+rr] * V[c*4+k]; M[c*4+rr] = s; }
   return M;
 }
-function viewBox(aspect){        // where the screen's rays meet the mean terrain height, in metres from the north-west corner
-  const {eye, f, r, u} = basis(), th = Math.tan(FOV / 2), y0 = (hMean - hMin) * EXAG; let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, hit = 0;
-  for (let i = 0; i <= 8; i++) for (let j = 0; j <= 8; j++){ const nx = i / 4 - 1, ny = j / 4 - 1;
+function rayBox(aspect, levels){   // box around where rays through a grid of screen points meet the given ground levels (metres above the lowest ground)
+  const {eye, f, r, u} = basis(), th = Math.tan(FOV / 2); let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, miss = 0;
+  for (const lev of levels) for (let i = 0; i <= 8; i++) for (let j = 0; j <= 8; j++){ const nx = i / 4 - 1, ny = j / 4 - 1;
     const d = norm([f[0] + r[0]*nx*th*aspect + u[0]*ny*th, f[1] + r[1]*nx*th*aspect + u[1]*ny*th, f[2] + r[2]*nx*th*aspect + u[2]*ny*th]);
-    if (d[1] >= -1e-4) continue; const s = (y0 - eye[1]) / d[1]; if (s <= 0) continue; hit++;
-    const x = eye[0] + d[0]*s + extent[0]/2, z = eye[2] + d[2]*s + extent[1]/2; x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
-  if (hit < 8) return [0, extent[0], 0, extent[1]];
+    const t = Math.abs(d[1]) > 1e-4 ? (lev * EXAG - eye[1]) / d[1] : -1; if (t <= 0) { miss++; continue; }
+    const x = eye[0] + d[0]*t + extent[0]/2, z = eye[2] + d[2]*t + extent[1]/2; x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); }
+  if (miss > 40 * levels.length || !(x1 >= x0)) return [0, extent[0], 0, extent[1]];      // looking toward the horizon: anything could be in view
   return [Math.max(0, x0), Math.min(extent[0], x1), Math.max(0, z0), Math.min(extent[1], z1)];
+}
+function viewBox(aspect){          // the ground the screen can show, in metres from the north-west corner
+  // Rays through a grid of screen points are walked forward until they go below the coarse whole-site ground.
+  // The box around those meeting points is what is visible, whatever shape the terrain has.
+  const {eye, f, r, u} = basis(), th = Math.tan(FOV / 2), G = coarseGrid, step = Math.max(G.cell, cam.dist / 80), far = cam.dist * 10 + 3000;
+  let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity, hits = 0;
+  for (let i = 0; i <= 10; i++) for (let j = 0; j <= 10; j++){ const nx = i / 5 - 1, ny = j / 5 - 1;
+    const d = norm([f[0] + r[0]*nx*th*aspect + u[0]*ny*th, f[1] + r[1]*nx*th*aspect + u[1]*ny*th, f[2] + r[2]*nx*th*aspect + u[2]*ny*th]);
+    for (let t = step; t < far; t += step){ const x = eye[0] + d[0]*t + extent[0]/2, z = eye[2] + d[2]*t + extent[1]/2, y = eye[1] + d[1]*t;
+      if (y < 0) break;                                                    // below the lowest ground: nothing further on
+      if (x < 0 || z < 0 || x >= extent[0] || z >= extent[1]) continue;
+      const q = G.h[Math.min(G.H - 1, Math.floor(z / G.cell)) * G.W + Math.min(G.W - 1, Math.floor(x / G.cell))];
+      if (q === q && y <= (q - hMin) * EXAG){ hits++; x0 = Math.min(x0, x); x1 = Math.max(x1, x); z0 = Math.min(z0, z); z1 = Math.max(z1, z); break; } } }
+  if (hits < 3) return rayBox(aspect, [hMean - hMin]);                     // looking past the site: fall back to the average ground level
+  const pad = 2 * step + 0.06 * Math.max(x1 - x0, z1 - z0);                // the rays are a sample: leave room between them
+  return [Math.max(0, x0 - pad), Math.min(extent[0], x1 + pad), Math.max(0, z0 - pad), Math.min(extent[1], z1 + pad)];
 }
 
 /* ---------- choosing tiles ---------- */
 const metresPerPixel = () => 2 * cam.dist * Math.tan(FOV / 2) / Math.max(canvas.height, 1);   // ground covered by one screen pixel at the target
 function pickLevel(L, pixelsPerCell){ let best = L.levels.length - 1; const m = metresPerPixel() * pixelsPerCell;
   for (let i = L.levels.length - 1; i >= 0; i--) if (L.levels[i].cell_m >= m) best = i; return best; }
-function tilesInView(lv, limit){          // tiles of a level under the camera, nearest to the target first
+function tilesInView(lv, limit, ring = 0){          // tiles of a level the camera can see (plus `ring` tiles around), nearest to the target first
   const box = viewBox(canvas.width / Math.max(canvas.height, 1)), cm = lv.cell_m * CHUNK, have = new Set(lv.chunks), out = [];
   const tc = (cam.target[0] + extent[0] / 2) / cm, tr = (cam.target[2] + extent[1] / 2) / cm;
-  for (let r = Math.floor(box[2] / cm); r <= Math.floor(box[3] / cm); r++) for (let c = Math.floor(box[0] / cm); c <= Math.floor(box[1] / cm); c++)
+  for (let r = Math.floor(box[2] / cm) - ring; r <= Math.floor(box[3] / cm) + ring; r++) for (let c = Math.floor(box[0] / cm) - ring; c <= Math.floor(box[1] / cm) + ring; c++)
     if (have.has(r + "." + c)) out.push({r, c, d: Math.hypot(r + .5 - tr, c + .5 - tc)});
   out.sort((a, b) => a.d - b.d); return out.slice(0, limit);
 }
@@ -273,7 +296,8 @@ function update(){
   // ground: about one vertex per two pixels, never finer than this layer's own ground
   const g = ground, gi = pickLevel(g.E, 2.0); groundDraw = [];
   if (gi < g.baseLevel){
-    for (const q of tilesInView(g.E.levels[gi], MAX_GROUND_TILES)){ wantGround(g, gi, q.r, q.c, q.d + 0.25);
+    // one extra ring of ground tiles, so the join between detailed and coarse ground stays outside the picture
+    for (const q of tilesInView(g.E.levels[gi], MAX_GROUND_TILES, 1)){ wantGround(g, gi, q.r, q.c, q.d + 0.25);
       const id = gi + "/" + q.r + "." + q.c; if (g.stale.has(id) && g.heights.has(id)){ groundTile(g, gi, q.r, q.c); g.stale.delete(id); }
       const m = g.meshes.get(id); if (m){ m.used = performance.now(); groundDraw.push({m, r: q.r, c: q.c}); } }
     if (g.meshes.size > KEEP_GROUND_MESHES){ const old = [...g.meshes.entries()].sort((a, b) => (a[1].used || 0) - (b[1].used || 0)).slice(0, g.meshes.size - KEEP_GROUND_MESHES);
