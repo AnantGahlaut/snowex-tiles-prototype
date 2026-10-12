@@ -13,6 +13,8 @@ write it, any Zarr reader can open it):
       snow_depth_<date>/0 ..                            LiDAR snow depth
       rf_<N>m/0 ..                                      random-forest prediction made at N m blocks
       error_<N>m/0 ..                                   prediction minus LiDAR (same blocks)
+      lidar_<N>m/0 ..                                   LiDAR snow depth averaged to the same N m blocks:
+                                                        the values the model at that block size is scored against
       elevation_<N>m/0 ..                               elevation averaged to the same N m blocks, so the
                                                         ground under a model's cells has the model's detail
 
@@ -156,6 +158,10 @@ def main(argv=None) -> int:
         layers.append(write_layer(root, f"error_{n}m", rf - lidar, float(n), 0.001, 0.0,
                                   {"label": f"Prediction minus LiDAR · {n} m blocks", "units": "m", "cmap": "diverging",
                                    "kind": "error", "block_m": n}, meta))
+        if n > 3:                         # at 3 m the plain snow-depth layer is shown
+            layers.append(write_layer(root, f"lidar_{n}m", lidar, float(n), 0.001, 0.0,
+                                      {"label": f"LiDAR snow depth · {n} m blocks", "units": "m", "cmap": "blues",
+                                       "kind": "lidar_block", "block_m": n}, meta))
         if n % 3 == 0 and n > 3:          # at 3 m the plain `elevation` layer already is this
             layers.append(write_layer(root, f"elevation_{n}m", block_mean(elev, n // 3), float(n), 0.1, elev_offset,
                                       {"label": f"Elevation · {n} m blocks", "units": "m", "cmap": "terrain",

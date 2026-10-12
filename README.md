@@ -25,9 +25,17 @@ This is a test on one site. It is the starting point for a shared viewer for the
 | Prediction minus LiDAR | Blue where the model predicts too much snow, red where too little |
 | Elevation | The LiDAR terrain model |
 
-The block-size buttons (3 m to 99 m) switch between six separately trained models. The
-ground is drawn at the same block size as the model, so each coloured cell sits on its own
-piece of terrain.
+The block-size buttons (3 m to 99 m) apply to every layer:
+
+- **Predictions and errors** switch between six separately trained models, one per block size.
+- **LiDAR snow depth and elevation** switch to the 3 m data averaged to that block size. For
+  snow depth these are the values the model at that block size is scored against, so you can
+  put what was measured next to what was predicted at the same detail.
+- **The ground** is drawn at the same block size, so each coloured cell sits on its own piece
+  of terrain.
+
+All snow-depth layers share one colour scale, and all error layers share another, so colours
+mean the same thing at every block size.
 
 ## How it works
 
@@ -42,7 +50,7 @@ piece of terrain.
    Until a chunk arrives, that patch shows the coarser level.
 
 Zooming from the whole site to full 3 m detail in one place downloads about 4 MB of the
-178 MB store.
+190 MB store.
 
 ## The store
 
@@ -52,7 +60,7 @@ banner_summit.zarr/
   elevation/0 .. 6               level 0 = 3 m, each next level 2x coarser
   snow_depth_20210315/0 .. 6     LiDAR snow depth
   rf_<N>m/, error_<N>m/          prediction and error of the model trained at N m blocks
-  elevation_<N>m/                elevation averaged to the same N m blocks
+  lidar_<N>m/, elevation_<N>m/   LiDAR snow depth and elevation averaged to the same N m blocks
 ```
 
 Values are 16-bit integers with a scale and offset (`value = stored * scale_factor +
@@ -92,3 +100,7 @@ what was fetched and whether any background shows through the ground.
 Observations are from the NASA SnowEx campaigns (LiDAR and UAVSAR), aligned in the
 [SnowEx Field Atlas v1.0.05](https://github.com/cryogars/cryogars-atlas/tree/v1.0.05).
 Built by Anant Gahlaut at [CryoGARS](https://github.com/cryogars), Boise State University.
+
+## Licence
+
+Code: [MIT](LICENSE). The source datasets keep their own attribution and use requirements.

@@ -26,8 +26,10 @@ p.note{color:var(--muted);font-size:12.5px;margin:8px 0 0}
   <h1 id="title">Banner Summit</h1>
   <p class="sub" id="subtitle">Loading the site description…</p>
   <h2>Layer</h2><div class="opts" id="layers"></div>
-  <h2>Model block size</h2><div class="chips" id="blocks"></div>
-  <p class="note" id="blocknote">Each block size is a separately trained model. The ground is drawn at the same block size.</p>
+  <h2>Block size</h2><div class="chips" id="blocks"></div>
+  <p class="note" id="blocknote">Predictions: each block size is a separately trained model. LiDAR and elevation: the 3 m
+    data averaged to that block size, which is what that model is scored against. Blocks with too few valid cells are
+    left blank, as in training. The ground is drawn at the same block size.</p>
   <h2>Colours</h2><div id="legend"><div id="ramp"></div><div id="ticks"><span id="lo"></span><span id="unit"></span><span id="hi"></span></div></div>
   <h2>What is loaded</h2>
   <dl><dt>Colour detail on screen</dt><dd id="s-level">–</dd><dt>Ground detail on screen</dt><dd id="s-ground">–</dd>
@@ -340,19 +342,29 @@ function draw(){
 }
 
 /* ---------- layer choice ---------- */
-let kind = "lidar", block = 30;
+let kind = "lidar", block = 3, chooseSeq = 0;
 async function choose(){
-  const want = kind === "prediction" ? "rf_" + block + "m" : kind === "error" ? "error_" + block + "m" : kind === "terrain" ? "elevation" : site.layers.find(l => l.kind === "lidar").key;
+  const mine = ++chooseSeq;                 // if another choice is made while this one is loading, the newer one wins
+  // every layer follows the block size; at 3 m, LiDAR and elevation are the plain full-detail layers
+  const blockOr = (name, plain) => (block > 3 && byKey(name + "_" + block + "m")) ? name + "_" + block + "m" : plain;
+  const want = kind === "prediction" ? "rf_" + block + "m" : kind === "error" ? "error_" + block + "m"
+    : kind === "terrain" ? blockOr("elevation", "elevation") : blockOr("lidar", site.layers.find(l => l.kind === "lidar").key);
   const L = byKey(want); if (!L) return;
   const g = await prepareGround(groundFor(L));
   if (!L._coarse) L._coarse = await loadWholeLevel(L, L.levels.length - 1);
+  if (mine !== chooseSeq) return;
   layer = L; ground = g; setRamp(L.cmap);
-  range = L.cmap === "diverging" ? (m => [-m, m])(Math.max(Math.abs(L.p2), Math.abs(L.p98))) : [L.p2, L.p98];
+  range = sharedRange(L);
   $("lo").textContent = range[0].toFixed(2); $("hi").textContent = range[1].toFixed(2); $("unit").textContent = L.units + (L.cmap === "diverging" ? " · blue = model too deep" : "");
   $("s-finest").textContent = `${L.cell_m} m colours · ${g.E.cell_m} m ground`;
   for (const b of $("layers").children) b.setAttribute("aria-pressed", String(b.dataset.kind === kind));
-  for (const b of $("blocks").children){ b.setAttribute("aria-pressed", String(+b.dataset.block === block)); b.disabled = !(kind === "prediction" || kind === "error"); }
+  for (const b of $("blocks").children) b.setAttribute("aria-pressed", String(+b.dataset.block === block));
   dirty = true;
+}
+function sharedRange(L){        // one colour scale per kind of layer, so block sizes and LiDAR vs prediction can be compared by eye
+  if (L.cmap === "diverging"){ const m = Math.max(...site.layers.filter(l => l.kind === "error").map(l => Math.max(Math.abs(l.p2), Math.abs(l.p98)))); return [-m, m]; }
+  if (L.cmap === "terrain"){ const e = byKey("elevation"); return [e.p2, e.p98]; }
+  const d = site.layers.find(l => l.kind === "lidar"); return [d.p2, d.p98];
 }
 function buildUI(){
   $("title").textContent = site.site.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase());

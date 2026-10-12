@@ -1,0 +1,1 @@
+{"zarr_format": 2, "shape": [1103, 1011], "chunks": [256, 256], "dtype": "<i2", "compressor": {"id": "zlib", "level": 6}, "fill_value": -32768, "order": "C", "filters": null, "dimension_separator": "."}

@@ -39,12 +39,15 @@ const js = async expr => { const r = await send("Runtime.evaluate", {expression:
     for (const k of ["prediction", "error", "terrain"]) { await js(`document.querySelector('#layers [data-kind=${k}]').click()`); await settle(); console.log(await snap(k), "| colours:", await pixel()); }
     await js(`document.querySelector('#layers [data-kind=prediction]').click()`); await settle();
     for (const b of await js(`return [...document.querySelectorAll('#blocks button')].map(b=>b.dataset.block)`)) { await js(`document.querySelector('#blocks [data-block="${b}"]').click()`); await settle(); console.log(await snap("prediction " + b + " m"), "| finest:", await js(`return document.getElementById('s-finest').textContent`)); }
+    await js(`document.querySelector('#layers [data-kind=lidar]').click()`); await settle();
+    for (const b of await js(`return [...document.querySelectorAll('#blocks button')].map(b=>b.dataset.block)`)) { await js(`document.querySelector('#blocks [data-block="${b}"]').click()`); await settle();
+      console.log(await snap("LiDAR at " + b + " m"), "|", await js(`return document.getElementById('hud').textContent.split(' · ').slice(0,2).join(' · ')+' | range '+document.getElementById('lo').textContent+'..'+document.getElementById('hi').textContent`)); }
     // seam check: zoom in on the LiDAR layer, pan in steps, and count pixels that show the background through the ground
     await js(`document.querySelector('#layers [data-kind=error]').click(); document.querySelector('#blocks [data-block="3"]').click()`); await settle();
     const holes = () => js(`const c=document.getElementById('gl'),g=c.getContext('webgl2');await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
       const p=new Uint8Array(4*c.width*c.height);g.readPixels(0,0,c.width,c.height,g.RGBA,g.UNSIGNED_BYTE,p);let n=0;for(let i=0;i<p.length;i+=4)if(p[i]<12&&p[i+1]>14&&p[i+1]<22&&p[i+2]>18&&p[i+2]<26)n++;return [n,c.width*c.height]`);
     const seen = [];
-    for (let k = 0; k <= 8; k++) { await js(`window.__setView(420, ${-1200 + k * 100}, 150)`); await settle(); const [n, total] = await holes(); seen.push((100 * n / total).toFixed(3)); }
+    for (let k = 0; k <= 8; k++) { await js(`window.__setView(420, ${-1200 + k * 100}, 150)`); await settle(); const [n, total] = await holes(); seen.push((100 * n / total).toFixed(3) + "/" + await js(`return window.__tiles.groundTiles+"t"`)); }
     console.log("background showing through while panning at 3 m (% of pixels per step):", seen.join(" "), "| ground tiles", await js(`return window.__tiles.groundTiles`));
     if (SHOT) { await js(`document.querySelector('#layers [data-kind=lidar]').click(); window.__setView(1400, 0, 0)`); await settle(); await sleep(500);
       const r = await send("Page.captureScreenshot", {format: "png"}); fs.writeFileSync(SHOT, Buffer.from(r.data, "base64")); console.log("screenshot", SHOT); }
