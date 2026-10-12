@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/cryogars-logo-white.png" alt="CryoGARS" width="300">
+</p>
+
 # SnowEx streaming tiles (prototype)
 
 **[Open the live demo →](https://anantgahlaut.github.io/snowex-tiles-prototype/)**
@@ -7,10 +11,12 @@ predictions in the browser without downloading the dataset. The page holds no da
 fetches small tiles as you move, at the detail the zoom needs, for both the colours and
 the shape of the ground.
 
-![Banner Summit LiDAR snow depth at 3 m, streamed as tiles](docs/screenshot.png)
+![Banner Summit: random forest prediction minus LiDAR snow depth, 3 m cells, streamed as tiles](docs/banner-summit-prediction-error.jpg)
 
-*Banner Summit, Idaho: LiDAR snow depth from 2021-03-15 at 3 m cells on 3 m terrain. The
-panel on the left shows how much has been fetched.*
+*Banner Summit, Idaho, 2021-03-15: snow depth predicted by the 3 m random forest minus the
+LiDAR measurement, by a model that never saw this site. Blue is where the model predicts too
+much snow, red is where it predicts too little. This shows where a baseline model goes
+wrong; it is not a validated snow-depth product.*
 
 This is a test on one site. It is the starting point for a shared viewer for the
 [SnowEx Field Atlas](https://github.com/cryogars/cryogars-atlas) and the
